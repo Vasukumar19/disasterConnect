@@ -1,22 +1,33 @@
+"""Peer discovery using UDP broadcast for local network"""
+
 import socket
 import json
 import threading
 import time
-from typing import Callable
+from typing import Callable, Set
 
 
 class PeerDiscovery:
     """Peer discovery using UDP broadcast"""
     
     BROADCAST_PORT = 37020
-    DISCOVERY_INTERVAL = 5  # seconds
+    DISCOVERY_INTERVAL = 5  # seconds between announcements
     
-    def __init__(self, peer_id: str, p2p_port: int, on_peer_found: Callable):
+    def __init__(self, peer_id: str, p2p_port: int, 
+                 on_peer_found: Callable):
+        """
+        Initialize peer discovery
+        
+        Args:
+            peer_id: This peer's unique identifier
+            p2p_port: P2P communication port
+            on_peer_found: Callback when peer discovered
+        """
         self.peer_id = peer_id
         self.p2p_port = p2p_port
         self.on_peer_found = on_peer_found
         self.running = False
-        self.discovered_peers = set()
+        self.discovered_peers: Set[str] = set()
         
         # Create UDP socket for broadcasting
         self.broadcast_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -26,24 +37,38 @@ class PeerDiscovery:
         # Create UDP socket for listening
         self.listen_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.listen_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        
+        self.rendezvous = ""
     
     def start(self, rendezvous: str):
-        """Start peer discovery"""
+        """
+        Start peer discovery
+        
+        Args:
+            rendezvous: Service name/rendezvous point for discovery
+        """
         self.rendezvous = rendezvous
         self.running = True
         
-        # Bind listen socket
+        # Bind listen socket to broadcast port
         try:
             self.listen_socket.bind(('', self.BROADCAST_PORT))
-        except OSError:
-            print(f"⚠ Port {self.BROADCAST_PORT} already in use, discovery may be limited")
+        except OSError as e:
+            print(f"⚠ Port {self.BROADCAST_PORT} already in use: {e}")
+            print("  Discovery may be limited to locally initiated connections")
         
         # Start broadcaster thread
-        broadcast_thread = threading.Thread(target=self._broadcast_presence, daemon=True)
+        broadcast_thread = threading.Thread(
+            target=self._broadcast_presence,
+            daemon=True
+        )
         broadcast_thread.start()
         
         # Start listener thread
-        listen_thread = threading.Thread(target=self._listen_for_peers, daemon=True)
+        listen_thread = threading.Thread(
+            target=self._listen_for_peers,
+            daemon=True
+        )
         listen_thread.start()
         
         print(f"✓ Peer discovery started")
@@ -62,15 +87,19 @@ class PeerDiscovery:
                 }
                 
                 message = json.dumps(announcement).encode('utf-8')
-                self.broadcast_socket.sendto(message, ('255.255.255.255', self.BROADCAST_PORT))
+                self.broadcast_socket.sendto(
+                    message,
+                    ('255.255.255.255', self.BROADCAST_PORT)
+                )
                 
             except Exception as e:
-                print(f"Broadcast error: {e}")
+                if self.running:
+                    print(f"Broadcast error: {e}")
             
             time.sleep(self.DISCOVERY_INTERVAL)
     
     def _listen_for_peers(self):
-        """Listen for peer announcements"""
+        """Listen for peer announcements from network"""
         self.listen_socket.settimeout(1.0)
         
         while self.running:
@@ -87,8 +116,8 @@ class PeerDiscovery:
                     continue
                 
                 peer_id = message.get('peer_id')
-                peer_port = message.get('p2p_port')
-                peer_ip = addr[0]
+                peer_port = message.get('p2p_port')  # FIXED: Use this, not addr[1]
+                peer_ip = addr[0]  # IP from packet is still correct
                 
                 # New peer discovered
                 if peer_id and peer_id not in self.discovered_peers:
@@ -97,23 +126,35 @@ class PeerDiscovery:
                     
                     # Notify callback
                     if self.on_peer_found:
-                        self.on_peer_found(peer_id, peer_ip, peer_port)
-                        
+                        try:
+                            self.on_peer_found(peer_id, peer_ip, peer_port)  # Now correct port
+                        except Exception as e:
+                            print(f"Error in peer discovery callback: {e}")
+                            
             except socket.timeout:
                 continue
             except Exception as e:
                 if self.running:
                     print(f"Listen error: {e}")
+
+    
+    def get_discovered_peers(self) -> Set[str]:
+        """Get set of discovered peer IDs"""
+        return self.discovered_peers.copy()
     
     def stop(self):
         """Stop peer discovery"""
         self.running = False
-        self.broadcast_socket.close()
-        self.listen_socket.close()
+        try:
+            self.broadcast_socket.close()
+            self.listen_socket.close()
+        except:
+            pass
         print("✓ Peer discovery stopped")
 
 
-def init_mdns(peer_id: str, p2p_port: int, rendezvous: str, on_peer_found: Callable) -> PeerDiscovery:
+def init_mdns(peer_id: str, p2p_port: int, rendezvous: str, 
+              on_peer_found: Callable) -> PeerDiscovery:
     """
     Initialize peer discovery service
     
@@ -121,7 +162,7 @@ def init_mdns(peer_id: str, p2p_port: int, rendezvous: str, on_peer_found: Calla
         peer_id: This peer's ID
         p2p_port: P2P communication port
         rendezvous: Service name for discovery
-        on_peer_found: Callback when peer is discovered
+        on_peer_found: Callback when peer discovered
         
     Returns:
         PeerDiscovery instance
